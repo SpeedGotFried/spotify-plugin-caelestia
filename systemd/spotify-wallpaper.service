@@ -1,0 +1,19 @@
+[Unit]
+Description=Spotify Wallpaper Plugin for Caelestia
+Documentation=https://github.com/vaishnav-mk/spotify-plugin-caelestia
+# Start after the graphical session is up
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/spotify-wallpaper
+# Restart automatically if it crashes
+Restart=on-failure
+RestartSec=5s
+# Send logs to the systemd journal (view with: journalctl --user -u spotify-wallpaper -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

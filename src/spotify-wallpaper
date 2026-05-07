@@ -1,0 +1,246 @@
+#!/bin/bash
+# spotify-plugin-caelestia — event-driven Spotify wallpaper daemon
+# https://github.com/vaishnav-mk/spotify-plugin-caelestia
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+
+# ─── Load config ─────────────────────────────────────────────────
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/caelestia/spotify-plugin.conf"
+[[ -f "$CONFIG" ]] && source "$CONFIG"
+
+# ─── Defaults (overridden by config) ─────────────────────────────
+COVER_SIZE=${COVER_SIZE:-480}
+RADIUS=${RADIUS:-30}
+BLUR_STRENGTH=${BLUR_STRENGTH:-30}
+DARKEN_AMOUNT=${DARKEN_AMOUNT:-35}
+FONT_BOLD=${FONT_BOLD:-"/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Bold.ttf"}
+FONT_REGULAR=${FONT_REGULAR:-"/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"}
+TITLE_SIZE=${TITLE_SIZE:-40}
+ARTIST_SIZE=${ARTIST_SIZE:-26}
+MAX_CHARS=${MAX_CHARS:-28}
+VERTICAL_OFFSET=${VERTICAL_OFFSET:--80}
+PRIMARY_MONITOR=${PRIMARY_MONITOR:-0}
+RETRY_DELAY=${RETRY_DELAY:-5}
+
+# ─── Paths ───────────────────────────────────────────────────────
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/spotify-plugin-caelestia"
+STATE_FILE="$HOME/.local/state/caelestia/wallpaper/path.txt"
+mkdir -p "$CACHE"
+
+# ─── State ───────────────────────────────────────────────────────
+original_wallpaper=""
+last_trackid=""
+
+# ─── Helpers ─────────────────────────────────────────────────────
+log() { echo "[$(date +%T)] $*"; }
+
+trunc() {
+    local text="$1"
+    if (( ${#text} > MAX_CHARS )); then
+        echo "${text:0:$MAX_CHARS}..."
+    else
+        echo "$text"
+    fi
+}
+
+get_monitor_dims() {
+    hyprctl monitors -j 2>/dev/null \
+        | python3 -c "
+import sys, json
+monitors = json.load(sys.stdin)
+idx = int('${PRIMARY_MONITOR}')
+if idx < len(monitors):
+    m = monitors[idx]
+    print(m['width'], m['height'])
+else:
+    print(1920, 1080)
+" 2>/dev/null || echo "1920 1080"
+}
+
+set_wallpaper() {
+    local path="$1"
+    # caelestia shell wallpaper set applies to all monitors by default
+    caelestia shell wallpaper set "$path" 2>/dev/null
+    log "Wallpaper applied: $(basename "$path")"
+}
+
+save_original() {
+    if [[ -z "$original_wallpaper" && -f "$STATE_FILE" ]]; then
+        local current
+        current=$(cat "$STATE_FILE")
+        # Only save if it's not already one of our generated wallpapers
+        if [[ "$current" != "$CACHE"* ]]; then
+            original_wallpaper="$current"
+            log "Saved original wallpaper: $original_wallpaper"
+        fi
+    fi
+}
+
+restore_original() {
+    if [[ -n "$original_wallpaper" && -f "$original_wallpaper" ]]; then
+        log "Restoring original wallpaper..."
+        set_wallpaper "$original_wallpaper"
+        original_wallpaper=""
+    fi
+}
+
+# ─── Wallpaper builder ───────────────────────────────────────────
+build_wallpaper() {
+    local url="$1" title="$2" artist="$3" slug="$4"
+    local final="$CACHE/wall_${slug}.jpg"
+
+    read -r W H < <(get_monitor_dims)
+    W=${W:-1920}; H=${H:-1080}
+
+    local cover="$CACHE/cover_${slug}.jpg"
+    log "Downloading cover art..."
+    curl -s "$url" -o "$cover" 2>/dev/null
+
+    if [[ ! -s "$cover" ]]; then
+        log "ERROR: Cover download failed for $url"
+        return 1
+    fi
+
+    # Layout
+    local COVER_X=$(( W/2 - COVER_SIZE/2 ))
+    local COVER_Y=$(( H/2 - COVER_SIZE/2 + VERTICAL_OFFSET ))
+    local LINE_Y=$(( COVER_Y + COVER_SIZE + 24 ))
+    local TITLE_Y=$(( LINE_Y + 22 ))
+    local ARTIST_Y=$(( TITLE_Y + 52 ))
+
+    log "Building wallpaper at ${W}x${H}..."
+
+    # 1. Blurred + darkened background
+    magick "$cover" \
+        -resize "${W}x${H}^" -gravity center -extent "${W}x${H}" \
+        -blur "0x${BLUR_STRENGTH}" \
+        -fill black -colorize "${DARKEN_AMOUNT}%" \
+        "$CACHE/bg.jpg" || return 1
+
+    # 2. Square cover
+    magick "$cover" \
+        -resize "${COVER_SIZE}x${COVER_SIZE}!" \
+        "$CACHE/cover_sq.png"
+
+    # 3. Rounded corner mask
+    magick -size "${COVER_SIZE}x${COVER_SIZE}" xc:black \
+        -fill white \
+        -draw "roundrectangle 0,0 $((COVER_SIZE-1)),$((COVER_SIZE-1)) ${RADIUS},${RADIUS}" \
+        "$CACHE/mask.png"
+
+    # 4. Apply mask → rounded cover
+    magick "$CACHE/cover_sq.png" "$CACHE/mask.png" \
+        -alpha off -compose CopyOpacity -composite \
+        "$CACHE/cover_r.png"
+
+    # 5. Drop shadow
+    magick "$CACHE/mask.png" \
+        -background none -fill black -colorize 100 \
+        -alpha copy -shadow 60x18+0+8 \
+        "$CACHE/shadow.png"
+
+    # 6. Composite: bg + shadow + cover
+    magick "$CACHE/bg.jpg" \
+        \( "$CACHE/shadow.png" -geometry "+$((COVER_X - 18))+$((COVER_Y - 10))" \) -composite \
+        \( "$CACHE/cover_r.png" -geometry "+${COVER_X}+${COVER_Y}" \) -composite \
+        "$CACHE/comp.jpg"
+
+    # 7. Divider line
+    magick "$CACHE/comp.jpg" \
+        -stroke "#ffffff55" -strokewidth 1 \
+        -draw "line ${COVER_X},${LINE_Y} $((COVER_X + COVER_SIZE)),${LINE_Y}" \
+        "$CACHE/lined.jpg"
+
+    # 8. Title + artist text
+    magick "$CACHE/lined.jpg" \
+        -font "$FONT_BOLD" \
+        -fill white -pointsize "$TITLE_SIZE" \
+        -gravity northwest -annotate "+${COVER_X}+${TITLE_Y}" "$title" \
+        -font "$FONT_REGULAR" \
+        -fill "#aaaaaa" -pointsize "$ARTIST_SIZE" \
+        -gravity northwest -annotate "+${COVER_X}+${ARTIST_Y}" "$artist" \
+        "$final" || return 1
+
+    # Cleanup temp files
+    rm -f "$CACHE/bg.jpg" "$CACHE/cover_sq.png" "$CACHE/mask.png" \
+          "$CACHE/cover_r.png" "$CACHE/shadow.png" \
+          "$CACHE/comp.jpg" "$CACHE/lined.jpg"
+
+    log "Wallpaper built successfully"
+    echo "$final"
+}
+
+# ─── Track change handler ────────────────────────────────────────
+handle_track() {
+    local trackid="$1" url="$2" artist="$3" title="$4"
+
+    # Fix open.spotify.com → i.scdn.co CDN URL
+    if [[ "$url" == https://open.spotify.com/image/* ]]; then
+        url="${url/open.spotify.com\/image/i.scdn.co\/image}"
+    fi
+
+    if [[ -z "$url" || "$url" != http* ]]; then
+        log "No valid art URL — skipping"
+        return
+    fi
+
+    save_original
+
+    local slug="${trackid##*/}"
+    local final="$CACHE/wall_${slug}.jpg"
+
+    if [[ ! -f "$final" ]]; then
+        local t a
+        t=$(trunc "$title")
+        a=$(trunc "$artist")
+        final=$(build_wallpaper "$url" "$t" "$a" "$slug") || return
+    else
+        log "Using cached wallpaper"
+    fi
+
+    [[ -f "$final" ]] && set_wallpaper "$final"
+}
+
+# ─── Main event loop ─────────────────────────────────────────────
+log "spotify-plugin-caelestia starting (event-driven mode)"
+log "Config: ${CONFIG}"
+log "Cache:  ${CACHE}"
+
+while true; do
+    # Wait until Spotify is available
+    if ! playerctl -p spotify status &>/dev/null; then
+        log "Spotify not detected — waiting..."
+        restore_original
+        last_trackid=""
+        while ! playerctl -p spotify status &>/dev/null; do
+            sleep "$RETRY_DELAY"
+        done
+        log "Spotify detected — attaching..."
+    fi
+
+    # Event-driven: playerctl --follow streams a line on every metadata change.
+    # Using process substitution keeps variables in the main shell scope.
+    while IFS=$'\t' read -r status trackid arturl artist title; do
+        if [[ "$status" == "Playing" ]]; then
+            if [[ "$trackid" != "$last_trackid" && -n "$trackid" ]]; then
+                log "Now playing: $title — $artist"
+                last_trackid="$trackid"
+                handle_track "$trackid" "$arturl" "$artist" "$title"
+            fi
+        else
+            # Paused or stopped
+            if [[ -n "$original_wallpaper" ]]; then
+                log "Playback stopped — restoring original wallpaper"
+                restore_original
+                last_trackid=""
+            fi
+        fi
+    done < <(playerctl -p spotify --follow metadata \
+        --format $'{{status}}\t{{mpris:trackid}}\t{{mpris:artUrl}}\t{{xesam:artist}}\t{{xesam:title}}' \
+        2>/dev/null)
+
+    log "playerctl exited (Spotify closed?) — retrying in ${RETRY_DELAY}s..."
+    restore_original
+    last_trackid=""
+    sleep "$RETRY_DELAY"
+done
