@@ -93,11 +93,11 @@ build_wallpaper() {
     W=${W:-1920}; H=${H:-1080}
 
     local cover="$CACHE/cover_${slug}.jpg"
-    log "Downloading cover art..."
+    log "Downloading cover art..." >&2
     curl -s "$url" -o "$cover" 2>/dev/null
 
     if [[ ! -s "$cover" ]]; then
-        log "ERROR: Cover download failed for $url"
+        log "ERROR: Cover download failed for $url" >&2
         return 1
     fi
 
@@ -108,7 +108,7 @@ build_wallpaper() {
     local TITLE_Y=$(( LINE_Y + 22 ))
     local ARTIST_Y=$(( TITLE_Y + 52 ))
 
-    log "Building wallpaper at ${W}x${H}..."
+    log "Building wallpaper at ${W}x${H}..." >&2
 
     # 1. Blurred + darkened background
     magick "$cover" \
@@ -166,7 +166,7 @@ build_wallpaper() {
           "$CACHE/cover_r.png" "$CACHE/shadow.png" \
           "$CACHE/comp.jpg" "$CACHE/lined.jpg"
 
-    log "Wallpaper built successfully"
+    log "Wallpaper built successfully" >&2
     echo "$final"
 }
 
