@@ -21,15 +21,23 @@ MAX_CHARS=${MAX_CHARS:-28}
 VERTICAL_OFFSET=${VERTICAL_OFFSET:--80}
 PRIMARY_MONITOR=${PRIMARY_MONITOR:-0}
 RETRY_DELAY=${RETRY_DELAY:-5}
+MATCH_SCHEME=${MATCH_SCHEME:-false}
+SCHEME_MODE=${SCHEME_MODE:-dark}
+SCHEME_VARIANT=${SCHEME_VARIANT:-tonalspot}
 
 # ─── Paths ───────────────────────────────────────────────────────
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/spotify-plugin-caelestia"
 STATE_FILE="$HOME/.local/state/caelestia/wallpaper/path.txt"
 mkdir -p "$CACHE"
 
+# ─── Scheme state file ──────────────────────────────────────────
+SCHEME_STATE="$HOME/.local/state/caelestia/spotify-plugin-scheme.json"
+mkdir -p "$(dirname "$SCHEME_STATE")"
+
 # ─── State ───────────────────────────────────────────────────────
 original_wallpaper=""
 last_trackid=""
+original_scheme_saved=false
 
 # ─── Helpers ─────────────────────────────────────────────────────
 log() { echo "[$(date +%T)] $*"; }
@@ -81,6 +89,98 @@ restore_original() {
         log "Restoring original wallpaper..."
         set_wallpaper "$original_wallpaper"
         original_wallpaper=""
+    fi
+    restore_scheme
+}
+
+# ─── Scheme helpers ──────────────────────────────────────────────
+
+# Extract the single most-dominant hex colour from an image file.
+# Uses ImageMagick to quantise to 1 colour then read it back.
+extract_dominant_color() {
+    local img="$1"
+    magick "$img" \
+        -resize 50x50! \
+        -colors 1 \
+        -unique-colors \
+        txt:- 2>/dev/null \
+        | awk 'NR==2 { match($0, /#([0-9A-Fa-f]{6})/, a); print a[1] }'
+}
+
+# Save the currently active caelestia scheme so we can restore it later.
+save_scheme() {
+    $original_scheme_saved && return   # save only once per Spotify session
+    local name flavour mode variant
+    name=$(caelestia scheme get -n 2>/dev/null | tr -d '[:space:]')
+    flavour=$(caelestia scheme get -f 2>/dev/null | tr -d '[:space:]')
+    mode=$(caelestia scheme get -m 2>/dev/null | tr -d '[:space:]')
+    variant=$(caelestia scheme get -v 2>/dev/null | tr -d '[:space:]')
+    {
+        echo "name=$name"
+        echo "flavour=$flavour"
+        echo "mode=$mode"
+        echo "variant=$variant"
+    } > "$SCHEME_STATE"
+    original_scheme_saved=true
+    log "Saved original scheme: ${name}/${flavour}/${mode}/${variant}"
+}
+
+# Apply a caelestia scheme derived from an album art dominant colour.
+apply_scheme_from_cover() {
+    local cover_path="$1"
+    local hex
+    hex=$(extract_dominant_color "$cover_path")
+
+    if [[ -z "$hex" ]]; then
+        log "WARN: Could not extract dominant colour — skipping scheme update"
+        return
+    fi
+
+    log "Dominant album colour: #${hex} — applying scheme (mode=${SCHEME_MODE}, variant=${SCHEME_VARIANT})"
+    caelestia scheme set \
+        -n dynamic \
+        -f "${hex}" \
+        -m "${SCHEME_MODE}" \
+        -v "${SCHEME_VARIANT}" \
+        2>/dev/null && log "Scheme applied" || log "WARN: caelestia scheme set failed"
+}
+
+# Restore the scheme that was active before Spotify started.
+restore_scheme() {
+    if ! $original_scheme_saved; then
+        return
+    fi
+    original_scheme_saved=false
+
+    if [[ ! -f "$SCHEME_STATE" ]]; then
+        log "No saved scheme state — nothing to restore"
+        return
+    fi
+
+    log "Restoring original scheme..."
+    # Re-source the key=value state file
+    local name="" flavour="" mode="" variant=""
+    while IFS='=' read -r key val; do
+        case "$key" in
+            name)    name="$val"    ;;
+            flavour) flavour="$val" ;;
+            mode)    mode="$val"    ;;
+            variant) variant="$val" ;;
+        esac
+    done < "$SCHEME_STATE"
+
+    local args=()
+    [[ -n "$name" ]]    && args+=(-n "$name")
+    [[ -n "$flavour" ]] && args+=(-f "$flavour")
+    [[ -n "$mode" ]]    && args+=(-m "$mode")
+    [[ -n "$variant" ]] && args+=(-v "$variant")
+
+    if (( ${#args[@]} > 0 )); then
+        caelestia scheme set "${args[@]}" 2>/dev/null \
+            && log "Scheme restored (${name}/${flavour}/${mode}/${variant})" \
+            || log "WARN: scheme restore failed"
+    else
+        log "Saved scheme state has no usable fields — restore skipped"
     fi
 }
 
@@ -170,7 +270,7 @@ build_wallpaper() {
     echo "$final"
 }
 
-# ─── Track change handler ────────────────────────────────────────
+# ─── Track change handler ──────────────────────────────────────────
 handle_track() {
     local trackid="$1" url="$2" artist="$3" title="$4"
 
@@ -186,7 +286,13 @@ handle_track() {
 
     save_original
 
+    # Save the current scheme before changing it (once per session)
+    if [[ "$MATCH_SCHEME" == "true" ]]; then
+        save_scheme
+    fi
+
     local slug="${trackid##*/}"
+    local cover="$CACHE/cover_${slug}.jpg"
     local final="$CACHE/wall_${slug}.jpg"
 
     if [[ ! -f "$final" ]]; then
@@ -199,6 +305,16 @@ handle_track() {
     fi
 
     [[ -f "$final" ]] && set_wallpaper "$final"
+
+    # Apply caelestia scheme from album dominant colour
+    if [[ "$MATCH_SCHEME" == "true" ]]; then
+        # Prefer the already-downloaded cover; fall back to fresh download
+        if [[ ! -f "$cover" ]]; then
+            cover="$CACHE/cover_tmp_${slug}.jpg"
+            curl -s "$url" -o "$cover" 2>/dev/null
+        fi
+        [[ -s "$cover" ]] && apply_scheme_from_cover "$cover"
+    fi
 }
 
 # ─── Main event loop ─────────────────────────────────────────────
@@ -229,8 +345,8 @@ while true; do
             fi
         else
             # Paused or stopped
-            if [[ -n "$original_wallpaper" ]]; then
-                log "Playback stopped — restoring original wallpaper"
+            if [[ -n "$original_wallpaper" || "$original_scheme_saved" == "true" ]]; then
+                log "Playback stopped — restoring wallpaper & scheme"
                 restore_original
                 last_trackid=""
             fi

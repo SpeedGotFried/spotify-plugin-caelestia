@@ -4,7 +4,7 @@
 
 **Spotify album art wallpaper daemon for the [Caelestia](https://github.com/caelestia-dots/shell) shell**
 
-*Event-driven • Zero CPU polling • Fully configurable*
+*Event-driven • Zero CPU polling • Fully configurable • Album-matched colour schemes*
 
 </div>
 
@@ -15,7 +15,8 @@ When you play a track on Spotify, this plugin:
 2. Blurs + darkens it to create a full-screen background
 3. Composites a rounded album art card with track title and artist
 4. Pushes it to your wallpaper via `caelestia shell wallpaper set`
-5. Restores your original wallpaper when Spotify pauses or closes
+5. *(Optional)* Extracts the dominant album colour and applies it as your global caelestia colour scheme
+6. Restores your original wallpaper **and** colour scheme when Spotify pauses or closes
 
 Uses `playerctl --follow` — **no polling loop**, reacts instantly to track changes.
 
@@ -78,6 +79,18 @@ BLUR_STRENGTH=30
 
 # Vertical offset of the art from screen centre (negative = shift up)
 VERTICAL_OFFSET=-80
+
+# ── Match Scheme ─────────────────────────────────────────────────
+# Set to `true` to automatically apply a caelestia colour scheme
+# that matches the dominant colour of the current album art.
+MATCH_SCHEME=false
+
+# Force dark or light mode when Match Scheme is active.
+# Keeping this as `dark` means only dark themes are ever applied.
+SCHEME_MODE=dark
+
+# Caelestia scheme variant (tonalspot, vibrant, expressive, …)
+SCHEME_VARIANT=tonalspot
 ```
 
 Changes take effect on the next track change. No restart needed.
@@ -129,7 +142,11 @@ Download album art  →  build wallpaper with ImageMagick
        ↓
 caelestia shell wallpaper set <path>
        ↓
-On pause/close → restore original wallpaper
+[MATCH_SCHEME=true] Extract dominant hex colour from album art
+       ↓
+caelestia scheme set -n dynamic -f <hex> -m dark -v <variant>
+       ↓
+On pause/close → restore original wallpaper + original scheme
 ```
 
 Wallpapers are cached in `~/.cache/spotify-plugin-caelestia/` by track ID, so each track only needs to be built once.
