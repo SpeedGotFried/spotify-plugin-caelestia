@@ -42,7 +42,7 @@ paru -S playerctl imagemagick curl python hyprland caelestia-cli
 ## Install
 
 ```bash
-git clone https://github.com/yourusername/spotify-plugin-caelestia
+git clone https://github.com/SpeedGotFried/spotify-plugin-caelestia
 cd spotify-plugin-caelestia
 ./install.sh
 ```
